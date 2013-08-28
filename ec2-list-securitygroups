@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+var AWS = require('aws-sdk');
+var dashdash = require('dashdash');
+
+var OPTIONS_PARSER = dashdash.createParser({
+  options: [
+    {
+      names: ['account', 'a'],
+      type: 'string',
+      help: 'AWS account to use (~/.aws/<account>.json)',
+      helpArg: 'ACCOUNT'
+    }
+  ]
+});
+
+var opts = OPTIONS_PARSER.parse(process.argv);
+
+var account = opts.account;
+AWS.config.loadFromPath(process.env.HOME + '/.aws/' + account + '.json');
+
+function outputJson(err, data) {
+  if (err) {
+    console.error(err);
+  } else {
+    console.log(JSON.stringify(data, null, 2));
+  }
+};
+
+var ec2 = new AWS.EC2();
+ec2.describeSecurityGroups(outputJson);

@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+var AWS = require('aws-sdk');
+var dashdash = require('dashdash');
+var readline = require('readline');
+
+var OPTIONS_PARSER = dashdash.createParser({
+  options: [
+    {
+      names: ['account', 'a'],
+      type: 'string',
+      help: 'AWS account to use (~/.aws/<account>.json)',
+      helpArg: 'ACCOUNT'
+    }
+  ]
+});
+
+var opts = OPTIONS_PARSER.parse(process.argv);
+var account = opts.account;
+AWS.config.loadFromPath(process.env.HOME + '/.aws/' + account + '.json');
+
+var rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+function outputToConsole(err, data) {
+  if (err) {
+    console.error(err);
+  } else {
+    console.log(data);
+  }
+};
+
+var lines = [];
+
+rl.on('line', function (line) {
+  lines.push(line);
+});
+
+rl.on('SIGINT', function() {
+});
+
+rl.on('close', function () {
+  var json = lines.join(' ');
+  var incomingGroups = JSON.parse(json);
+  var incomingGroupsById = {};
+  var incomingGroupsByName = {};
+  incomingGroups.forEach(function(incomingGroup) {
+    incomingGroupsById[incomingGroup.GroupId] = incomingGroup;
+    incomingGroupsByName[incomingGroup.GroupName] = incomingGroup;
+  });
+  var withIncomingGroupById = function(groupId, callback) {
+    callback(incomingGroupsById[groupId]);
+  }
+  var ec2 = new AWS.EC2();
+  var targetVpc = undefined;
+  var withVpc = function(callback) {
+    if (targetVpc) {
+      callback(targetVpc);
+    } else {
+      ec2.describeVpcs(function(vpcsErr, vpcs) {
+        if (vpcsErr) {
+          console.error(vpcsErr);
+          throw new Error('Failed to describeVpcs');
+        } else {
+          targetVpc = vpcs.Vpcs[0].VpcId;
+          callback(targetVpc);
+        }
+      });
+    }
+  };
+  var existingGroupsByName = {};
+  var withExistingGroupByName = function(groupName, description, callback) {
+    var existingGroup = existingGroupsByName[groupName];
+    if (existingGroup) {
+      callback(existingGroup);
+    } else {
+      withVpc(function(targetVpc) {
+        ec2.createSecurityGroup({
+          GroupName: groupName,
+          Description: description,
+          VpcId: targetVpc
+        }, function(createErr, create) {
+          if (createErr) {
+            console.error(createErr);
+            throw new Error('Failed to createSecurityGroup');
+          } else {
+            var createdGroup = {
+              GroupId: create.GroupId,
+              GroupName: groupName
+            };
+            existingGroupsByName[groupName] = createdGroup;
+            callback(createdGroup);
+          }
+        });
+      });
+    }
+  };
+  ec2.describeSecurityGroups(function(sgsErr, sgs) {
+    if (sgsErr) {
+      console.error(sgsErr);
+      throw new Error('Failed to describeSecurityGroups');
+    } else {
+      var ownerId = sgs.SecurityGroups[0].OwnerId;
+      sgs.SecurityGroups.forEach(function(existingGroup) {
+        existingGroupsByName[existingGroup.GroupName] = existingGroup;
+      });
+      function byGroupName(name) {
+        return function(group) {
+          return group.GroupName == name;
+        }
+      }
+      var processGroups = function(incomingGroups) {
+        var incomingGroup = incomingGroups[0];
+        console.log(incomingGroup.GroupName);
+        var createGroup = function(ipPermissions) {
+          withExistingGroupByName(incomingGroup.GroupName, incomingGroup.Description, function(existingGroup) {
+            ec2.authorizeSecurityGroupIngress({
+              GroupId: existingGroup.GroupId,
+              IpPermissions: ipPermissions
+            }, outputToConsole);
+            processGroups(incomingGroups.slice(1));
+          });
+        };
+
+        var convertIpPermissions = undefined;
+        var ipPermissions = [];
+        var ipPermissionConverted = function(ipPermission, more) {
+          ipPermissions.push(ipPermission);
+          if (more.length == 0) {
+            createGroup(ipPermissions);
+          } else {
+            convertIpPermissions(more);
+          }
+        };
+        convertIpPermissions = function(ipPermissions) {
+          var ipPermission = ipPermissions[0];
+          var convertIpPermission = function(userIdGroupPairs) {
+            ipPermissionConverted({
+              UserIdGroupPairs: userIdGroupPairs,
+              IpRanges: ipPermission.IpRanges,
+              IpProtocol: ipPermission.IpProtocol,
+              FromPort: ipPermission.FromPort,
+              ToPort: ipPermission.ToPort
+            }, ipPermissions.slice(1));
+          };
+
+          var convertUserIdGroupPairs = undefined;
+          var userIdGroupPairs = [];
+          var userIdGroupPairConverted = function(userIdGroupPair, more) {
+            userIdGroupPairs.push(userIdGroupPair);
+            if (more.length == 0) {
+              convertIpPermission(userIdGroupPairs, more);
+            } else {
+              convertUserIdGroupPairs(more);
+            }
+          };
+          convertUserIdGroupPairs = function(userIdGroupPairs) {
+            var userIdGroupPair = userIdGroupPairs[0];
+            withIncomingGroupById(userIdGroupPair.GroupId, function(incomingGroup) {
+              withExistingGroupByName(incomingGroup.GroupName, incomingGroup.Description, function(targetGroup) {
+                userIdGroupPairConverted({
+                  UserId: ownerId,
+                  GroupId: targetGroup.GroupId
+                }, userIdGroupPairs.slice(1));
+              });
+            });
+          };
+          if (ipPermission.UserIdGroupPairs && ipPermission.UserIdGroupPairs.length == 0) {
+            convertIpPermission([]);
+          } else {
+            convertUserIdGroupPairs(ipPermission.UserIdGroupPairs);
+          }
+        };
+        if (incomingGroup.IpPermissions && incomingGroup.IpPermissions.length > 0) {
+          convertIpPermissions(incomingGroup.IpPermissions);
+        }
+      };
+      console.log(incomingGroups);
+      if (incomingGroups && incomingGroups.length > 0) {
+        processGroups(incomingGroups);
+      }
+    }
+  });
+});

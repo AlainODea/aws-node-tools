@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+var readline = require('readline');
+
+var rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+function outputToConsole(err, data) {
+  if (err) {
+    console.error(err);
+  } else {
+    console.log(data);
+  }
+};
+
+var lines = [];
+
+rl.on('line', function (line) {
+  lines.push(line);
+});
+
+rl.on('SIGINT', function() {
+});
+
+rl.on('close', function () {
+  var json = lines.join(' ');
+  var data = JSON.parse(json);
+  var sgs = data.SecurityGroups;
+  var nameById = {};
+  sgs.forEach(function(sg) {
+    nameById[sg.GroupId] = sg.GroupName
+  });
+  sgs.forEach(function(sg) {
+    console.log(sg.GroupName);
+    sg.IpPermissions.forEach(function(acl) {
+      var allowed = [];
+      acl.UserIdGroupPairs.forEach(function(ace) {
+        allowed.push(nameById[ace.GroupId]);
+      });
+      acl.IpRanges.forEach(function(ace) {
+        allowed.push(ace.CidrIp);
+      });
+      var ports = acl.FromPort === undefined || acl.FromPort === -1 ?
+        '<all>' : acl.FromPort === acl.ToPort ?
+        acl.ToPort : acl.FromPort + '-' + acl.ToPort;
+      var protocol = acl.IpProtocol == '-1' ?
+        '<all>' : acl.IpProtocol;
+      console.log("\t" + allowed.join(", ") + " -> " + protocol + "/" + ports);
+    });
+  });
+});
